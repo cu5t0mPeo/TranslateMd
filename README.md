@@ -604,5 +604,5 @@ The *BridgeRouter* exposes two functions for the two options mentioned above.
 1. A *retryReceiveMessage* function which, given a failing message id, attempts to receive the message again. This is useful if the error was based on a temporal condition. 
 1. A *reverseMessage* function which, given a failing message id, sends a message back to the original sender indicating that the message failed to be received. The original sender can then return any locked funds back to the user.
 
-![](https://pic.gksec.com/20240726/66a34e1e4a6a3.png)
+![20](https://pic.gksec.com/20240726/66a34e1e4a6a3.png)
 
