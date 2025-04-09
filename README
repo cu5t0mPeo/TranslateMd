@@ -1,0 +1,233 @@
+from web3 import Web3
+import time
+import json
+import requests
+infura_url = "https://mainnet.infura.io/v3/177c35e4b2b94da0a5d2a7aaa462e3c7"
+#account = "<YOUR-PUBLIC-ADDRESS>"
+eth_api_key = "5PBBIWZKT4W4UMYXGXVH2BF8S2E3XM9UZC"
+w3 = Web3(Web3.HTTPProvider(infura_url))
+
+def confirmations(tx_hash):
+  tx = w3.eth.get_transaction(tx_hash)
+  return w3.eth.block_number - tx.blockNumber
+
+def get_contract_abi(contract_address):
+  api_url = f"https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={eth_api_key}"
+  response = requests.get(api_url)
+  data = response.json()
+  return data["result"]
+
+def get_contract_info(contract_address, abi):
+    checksum_address = w3.to_checksum_address(contract_address)
+    return w3.eth.contract(checksum_address, abi=abi)
+
+
+def get_block_data():
+    block = w3.eth.get_block("latest")
+    print("Searching in block " + str(block.number))
+
+    if block and block.transactions:
+      for transaction in block.transactions:
+        tx_hash = transaction.hex()  # the hashes are stored in a hexBytes format
+        tx = w3.eth.get_transaction(tx_hash)
+        if tx.to is not None:
+          #if tx.to == account:
+            print("Transaction found in block {} :".format(block.number))
+            print({
+            "hash": tx_hash,
+            "from": tx["from"],
+            "value": w3.from_wei(tx["value"], "ether")
+            })
+    time.sleep(5)
+
+
+def monitor_function_calls(contract_address, function_name, abi=None):
+    checksum_address = w3.to_checksum_address(contract_address)
+    
+    # 如果没有提供ABI，则获取ABI
+    if abi is None:
+        abi = json.loads(get_contract_abi(contract_address))
+
+    # 创建合约对象
+    contract = w3.eth.contract(address=checksum_address, abi=abi)
+    
+    # 获取函数的签名
+    function_signature = None
+    for item in abi:
+        if item.get('type') == 'function' and item.get('name') == function_name:
+            types = [input['type'] for input in item.get('inputs', [])]
+            function_signature = w3.keccak(text=f"{function_name}({','.join(types)})").hex()[:8]
+            break
+    #print(w3.functions[function_name])
+    if not function_signature:
+        print(f"Function {function_name} not found in ABI")
+        return
+    
+    # 持续监听新区块
+    while True:
+        try:
+            # 获取最新区块
+            latest_block = w3.eth.block_number
+            block = w3.eth.get_block(latest_block, full_transactions=True)
+            print(f"check transaction in block number {latest_block}...")
+            print(type(block.transactions))
+            # 遍历区块中的所有交易
+            for tx in block.transactions:
+                # 检查交易是否与目标合约相关
+                if tx.to and tx.to.lower() == checksum_address.lower():
+                    # 获取交易输入数据的十六进制字符串
+                    tx_input = tx.input if isinstance(tx.input, str) else tx.input.hex()
+                    
+                    # 检查交易的输入数据是否包含函数签名
+                    if tx_input.startswith(function_signature):
+                        tx_receipt = w3.eth.get_transaction_receipt(tx.hash)
+                        print(f"\n检测到函数 {function_name} 被调用!")
+                        print(f"交易哈希: {tx.hash.hex()}")
+                        print(f"调用者: {tx['from']}")
+                        print(f"Gas使用量: {tx_receipt.gasUsed}")
+                        print(f"区块号: {tx.blockNumber}")
+                        
+                        # 解析函数输入参数（如果需要）
+                        try:
+                            func_obj = contract.get_function_by_signature(function_signature)
+                            decoded_input = func_obj.decode_input(tx_input)
+                            print(f"函数输入: {decoded_input}")
+                        except Exception as e:
+                            print(f"无法解析函数输入: {str(e)}")
+            
+            # 等待一段时间再检查下一个区块
+            time.sleep(5)
+            
+        except Exception as e:
+            print(f"监听时发生错误: {str(e)}")
+            time.sleep(5)
+
+def monitor_function_by_events(contract_address, function_name, abi=None):
+    """通过事件监听特定合约函数的调用
+    
+    Args:
+        contract_address: 要监听的合约地址
+        function_name: 要监听的函数名称
+        abi: 合约ABI，如果为None则自动获取
+    """
+    # 确保地址格式正确
+    checksum_address = w3.to_checksum_address(contract_address)
+    
+    # 如果没有提供ABI，则获取ABI
+    if abi is None:
+        abi = json.loads(get_contract_abi(contract_address))
+    
+    # 创建合约对象
+    contract = w3.eth.contract(address=checksum_address, abi=abi)
+    
+    # 查找与函数相关的事件
+    events = []
+    for item in abi:
+        if item.get('type') == 'event':
+            events.append(item.get('name'))
+    
+    if not events:
+        print(f"合约中未找到事件，将使用交易监听方式")
+        monitor_function_calls(contract_address, function_name, abi)
+        return
+    
+    print(f"开始通过事件监听合约 {contract_address} 的函数调用...")
+    print(f"可用事件: {', '.join(events)}")
+    
+    # 创建事件过滤器
+    event_filters = []
+    for event_name in events:
+        try:
+            event = getattr(contract.events, event_name)
+            event_filter = event.create_filter(fromBlock='latest')
+            event_filters.append((event_name, event_filter))
+            print(f"已创建 {event_name} 事件过滤器")
+        except Exception as e:
+            print(f"创建 {event_name} 事件过滤器失败: {str(e)}")
+    
+    # 持续监听事件
+    while True:
+        try:
+            for event_name, event_filter in event_filters:
+                for event in event_filter.get_new_entries():
+                    tx_hash = event['transactionHash'].hex()
+                    tx = w3.eth.get_transaction(tx_hash)
+                    
+                    # 检查交易的输入数据是否与目标函数相关
+                    function_signature = None
+                    for item in abi:
+                        if item.get('type') == 'function' and item.get('name') == function_name:
+                            types = [input['type'] for input in item.get('inputs', [])]
+                            function_signature = w3.keccak(text=f"{function_name}({','.join(types)})").hex()[:10]
+                            break
+                    
+                    if function_signature and tx.input.startswith(function_signature):
+                        print(f"\n通过事件 {event_name} 检测到函数 {function_name} 被调用!")
+                        print(f"交易哈希: {tx_hash}")
+                        print(f"调用者: {tx['from']}")
+                        print(f"区块号: {tx.blockNumber}")
+                        print(f"事件数据: {event['args']}")
+            
+            # 等待一段时间再检查新事件
+            time.sleep(5)
+            
+        except Exception as e:
+            print(f"监听事件时发生错误: {str(e)}")
+            time.sleep(5)
+
+def reslove_token_info(coin_info):
+  print(coin_info["coin"])
+  print(coin_info["chains"][0]["browserUrl"])
+  print(coin_info["chains"][0]["contractAddress"])
+
+def get_all_monitor_token_addresses():
+  token_infos = []
+  try:
+        api_url = "https://api.bitget.com/api/v2/spot/public/coins"
+        response = requests.get(api_url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            for i in data["data"]:
+              print("zzzzzz")
+              print(i)
+              if len(i["chains"]) != 0:
+                token_infos.append(
+                  {
+                    "coin_name": i["coin"],
+                    "coin_address": i["chains"][0]["contractAddress"],
+                    "browser_url": i["chains"][0]["browserUrl"]
+                  }
+                )
+            
+            with open('./bitget_coins.json', 'w') as f:
+                json.dump(data, f, indent=4)
+            
+            print(f"成功获取Bitget币种数据并保存到bitget_coins.json")
+            return data
+        else:
+            print(f"请求失败，状态码: {response.status_code}")
+            return None
+  except Exception as e:
+          print(f"获取Bitget币种数据时出错: {str(e)}")
+          return None
+
+
+
+#address_obj = get_contract_info("0xdac17f958d2ee523a2206206994597c13d831ec7", get_contract_abi("0xdac17f958d2ee523a2206206994597c13d831ec7"))
+# print(get_contract_abi("0x0f6d4d4643a514132f84f4a270946db3c7cb701c"))
+#print(address_obj.functions.totalSupply().call())
+#monitor_function_calls("0xdac17f958d2ee523a2206206994597c13d831ec7", "transfer")
+token_infos = get_all_monitor_token_addresses()
+print(token_infos)
+# print(address_obj.abi)
+# watch2()
+# watch()
+
+# 示例用法
+# 取消注释下面的代码来监听特定合约的函数调用
+# contract_address = "0x0f6d4d4643a514132f84f4a270946db3c7cb701c"  # 示例合约地址
+# function_name = "transfer"  # 要监听的函数名称
+# monitor_function_calls(contract_address, function_name)
+# 或者使用事件监听
+# monitor_function_by_events(contract_address, function_name)
